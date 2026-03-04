@@ -1,0 +1,10 @@
+bin/
+obj/
+*.db
+logs/
+token/
+appsettings.json
+credentials.json
+cafe24_token.txt
+*.user
+.vs/
