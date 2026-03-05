@@ -11,9 +11,13 @@ public class Cafe24Config
 {
     public string MallId { get; set; } = "";
     public string AccessToken { get; set; } = "";
+    public string ClientId { get; set; } = "";
+    public string ClientSecret { get; set; } = "";
+    public string RefreshToken { get; set; } = "";
     public string ApiVersion { get; set; } = "2023-03-01";
     public string DefaultShippingCompanyCode { get; set; } = "0019"; // CJ대한통운
     public int OrderFetchDays { get; set; } = 14;
+    public string? ConfigFilePath { get; set; }
 }
 
 public class Cafe24ApiClient
@@ -62,7 +66,11 @@ public class Cafe24ApiClient
     /// <summary>
     /// 날짜 범위로 주문 목록 조회 (페이징 처리)
     /// </summary>
-    public async Task<List<Cafe24Order>> FetchRecentOrders(DateTime startDt, DateTime endDt, IProgress<string>? progress = null)
+    /// <summary>
+    /// 날짜 범위 + 주문상태로 주문 목록 조회 (페이징 처리)
+    /// orderStatus: null이면 전체, "N20"이면 배송준비중 등
+    /// </summary>
+    public async Task<List<Cafe24Order>> FetchRecentOrders(DateTime startDt, DateTime endDt, IProgress<string>? progress = null, string? orderStatus = null)
     {
         var orders = new List<Cafe24Order>();
         var startDate = startDt.ToString("yyyy-MM-dd");
@@ -74,9 +82,12 @@ public class Cafe24ApiClient
         while (true)
         {
             page++;
-            progress?.Report($"Cafe24 주문 조회 중... (페이지 {page})");
+            var statusLabel = orderStatus != null ? $", 상태={orderStatus}" : "";
+            progress?.Report($"Cafe24 주문 조회 중... (페이지 {page}{statusLabel})");
 
             var url = $"admin/orders?start_date={startDate}&end_date={endDate}&limit={limit}&offset={offset}";
+            if (!string.IsNullOrEmpty(orderStatus))
+                url += $"&order_status={orderStatus}";
             var response = await ExecuteWithRetry(() => _http.GetAsync(url));
 
             if (response == null || !response.IsSuccessStatusCode)
@@ -230,6 +241,18 @@ public class Cafe24ApiClient
             {
                 var resp = await action();
 
+                // 401 → 토큰 갱신 후 재시도
+                if (resp.StatusCode == HttpStatusCode.Unauthorized && i == 0)
+                {
+                    _log.Warn("Access Token 만료 감지, 자동 갱신 시도...");
+                    if (await RefreshAccessTokenAsync())
+                    {
+                        resp = await action();
+                        return resp;
+                    }
+                    return resp;
+                }
+
                 // Rate limit 처리
                 if (resp.StatusCode == HttpStatusCode.TooManyRequests)
                 {
@@ -249,5 +272,97 @@ public class Cafe24ApiClient
             }
         }
         return null;
+    }
+
+    /// <summary>
+    /// Refresh Token으로 Access Token 자동 갱신 + appsettings.json 저장
+    /// </summary>
+    private async Task<bool> RefreshAccessTokenAsync()
+    {
+        if (string.IsNullOrEmpty(_config.ClientId) || string.IsNullOrEmpty(_config.ClientSecret) ||
+            string.IsNullOrEmpty(_config.RefreshToken))
+        {
+            _log.Error("토큰 갱신 불가: ClientId, ClientSecret, RefreshToken 설정을 확인하세요.");
+            return false;
+        }
+
+        try
+        {
+            var tokenUrl = $"https://{_config.MallId}.cafe24api.com/api/v2/oauth/token";
+            var authBytes = Encoding.ASCII.GetBytes($"{_config.ClientId}:{_config.ClientSecret}");
+            var authHeader = Convert.ToBase64String(authBytes);
+
+            using var tokenHttp = new HttpClient();
+            var request = new HttpRequestMessage(HttpMethod.Post, tokenUrl);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Basic", authHeader);
+            request.Content = new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                { "grant_type", "refresh_token" },
+                { "refresh_token", _config.RefreshToken }
+            });
+
+            var resp = await tokenHttp.SendAsync(request);
+            var body = await resp.Content.ReadAsStringAsync();
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                _log.Error($"토큰 갱신 실패 ({resp.StatusCode}): {body}");
+                return false;
+            }
+
+            var json = JObject.Parse(body);
+            var newAccessToken = json["access_token"]?.ToString();
+            var newRefreshToken = json["refresh_token"]?.ToString();
+
+            if (string.IsNullOrEmpty(newAccessToken))
+            {
+                _log.Error($"토큰 갱신 응답에 access_token 없음: {body}");
+                return false;
+            }
+
+            // 메모리 갱신
+            _config.AccessToken = newAccessToken;
+            if (!string.IsNullOrEmpty(newRefreshToken))
+                _config.RefreshToken = newRefreshToken;
+
+            // HttpClient 헤더 갱신
+            _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", newAccessToken);
+
+            _log.Info("Access Token 자동 갱신 성공");
+
+            // appsettings.json 저장
+            SaveTokensToConfig();
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _log.Error("토큰 갱신 예외", ex);
+            return false;
+        }
+    }
+
+    private void SaveTokensToConfig()
+    {
+        try
+        {
+            var configPath = _config.ConfigFilePath;
+            if (string.IsNullOrEmpty(configPath) || !File.Exists(configPath)) return;
+
+            var text = File.ReadAllText(configPath);
+            var json = JObject.Parse(text);
+            var cafe24 = json["Cafe24"] as JObject;
+            if (cafe24 == null) return;
+
+            cafe24["AccessToken"] = _config.AccessToken;
+            cafe24["RefreshToken"] = _config.RefreshToken;
+
+            File.WriteAllText(configPath, json.ToString(Formatting.Indented));
+            _log.Info("appsettings.json 토큰 저장 완료");
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"appsettings.json 토큰 저장 실패: {ex.Message}");
+        }
     }
 }

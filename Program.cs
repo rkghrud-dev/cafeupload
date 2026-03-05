@@ -50,9 +50,13 @@ static class Program
         {
             MallId = cafe24Section?["MallId"]?.ToString() ?? "YOUR_MALL_ID",
             AccessToken = cafe24Section?["AccessToken"]?.ToString() ?? "YOUR_ACCESS_TOKEN",
+            ClientId = cafe24Section?["ClientId"]?.ToString() ?? "",
+            ClientSecret = cafe24Section?["ClientSecret"]?.ToString() ?? "",
+            RefreshToken = cafe24Section?["RefreshToken"]?.ToString() ?? "",
             ApiVersion = cafe24Section?["ApiVersion"]?.ToString() ?? "2023-03-01",
             DefaultShippingCompanyCode = cafe24Section?["DefaultShippingCompanyCode"]?.ToString() ?? "0019",
-            OrderFetchDays = cafe24Section?["OrderFetchDays"]?.Value<int>() ?? 14
+            OrderFetchDays = cafe24Section?["OrderFetchDays"]?.Value<int>() ?? 14,
+            ConfigFilePath = configPath
         };
 
         var dbConnStr = config["Database"]?["ConnectionString"]?.ToString() ?? "Data Source=app.db";
