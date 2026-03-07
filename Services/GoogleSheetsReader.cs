@@ -231,4 +231,47 @@ public class GoogleSheetsReader
         _log.Info($"구글시트 '{sheetName}' 읽기 완료: {result.Rows.Count}행, 발주사 {result.Vendors.Count}개");
         return result;
     }
+    public RawSheetData ReadRawSheet(string spreadsheetId, string sheetName, int maxRows = 500)
+    {
+        var result = new RawSheetData();
+
+        var range = $"'{sheetName}'!A1:ZZ{maxRows}";
+        var request = _service.Spreadsheets.Values.Get(spreadsheetId, range);
+        request.ValueRenderOption = SpreadsheetsResource.ValuesResource.GetRequest.ValueRenderOptionEnum.FORMATTEDVALUE;
+
+        var response = request.Execute();
+        var values = response.Values;
+        if (values == null || values.Count == 0)
+        {
+            _log.Warn($"시트 '{sheetName}'에 데이터가 없습니다.");
+            return result;
+        }
+
+        var maxCols = values.Max(r => r.Count);
+        for (int i = 0; i < maxCols; i++)
+        {
+            var header = values[0].Count > i ? values[0][i]?.ToString()?.Trim() ?? "" : "";
+            if (string.IsNullOrWhiteSpace(header))
+                header = $"Column {i + 1}";
+            result.Headers.Add(header);
+        }
+
+        for (int row = 1; row < values.Count; row++)
+        {
+            var list = new List<string>(maxCols);
+            for (int col = 0; col < maxCols; col++)
+                list.Add(values[row].Count > col ? values[row][col]?.ToString()?.Trim() ?? "" : "");
+            result.Rows.Add(list);
+        }
+
+        _log.Info($"재고 시트 '{sheetName}' 로드: {result.Rows.Count}행");
+        return result;
+    }
 }
+
+public class RawSheetData
+{
+    public List<string> Headers { get; set; } = new();
+    public List<List<string>> Rows { get; set; } = new();
+}
+

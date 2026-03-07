@@ -6,7 +6,7 @@ using Newtonsoft.Json;
 
 namespace Cafe24ShipmentManager;
 
-public class MainForm : Form
+public partial class MainForm : Form
 {
     // ── Services ──
     private readonly DatabaseManager _db;
@@ -18,6 +18,8 @@ public class MainForm : Form
     private readonly string _credentialPath;
     private readonly string _spreadsheetId;
     private readonly string _defaultSheetName;
+    private const string StockSpreadsheetId = "1HWR8zdvx0DYbl4ac9hmGuaaIA47nMO0v1CtO99PyC6w";
+    private const int StockDefaultSheetGid = 2073400281;
 
     // ── State ──
     private ExcelReadResult? _excelResult;
@@ -43,6 +45,10 @@ public class MainForm : Form
     private TabPage tabShipment = null!;
     private TabPage tabPopular = null!;
     private TabPage tabProduct = null!;
+    private TabPage tabStock = null!;
+    private ComboBox cboStockSheet = null!;
+    private Button btnStockLoad = null!;
+    private DataGridView dgvStock = null!;
 
     // ── 출고 탭 내부 서브탭 ──
     private TabControl tabShipSub = null!;
@@ -70,6 +76,7 @@ public class MainForm : Form
 
         InitializeUI();
         WireEvents();
+        InitEnhancedState();
 
         _log.OnLog += msg =>
         {
@@ -119,6 +126,9 @@ public class MainForm : Form
 
             // 발주사 자동 로드
             await LoadVendorsAsync();
+
+            // 재고관리 확장 초기화
+            await InitEnhancedStockAsync();
         }
         catch (Exception ex)
         {
@@ -143,7 +153,7 @@ public class MainForm : Form
                 _sheetsReader.FetchVendorList(_spreadsheetId, sheetName));
 
             clbVendors.Items.Clear();
-            foreach (var v in vendors)
+            foreach (var v in ApplyShipmentVendorOrder(vendors))
                 clbVendors.Items.Add(v);
 
             lblStatus.Text = $"✅ '{sheetName}' — 발주사 {vendors.Count}개 로드됨";
@@ -178,12 +188,14 @@ public class MainForm : Form
         tabShipment = new TabPage("📦 출고/송장");
         tabPopular = new TabPage("📊 발주 많은 상품");
         tabProduct = new TabPage("📋 상품정보");
+        tabStock = new TabPage("🧮 재고관리");
 
         BuildShipmentTab();
         BuildPlaceholderTab(tabPopular, "발주 많은 상품 분석 — 추후 구현 예정");
         BuildPlaceholderTab(tabProduct, "상품정보 관리 — 추후 구현 예정");
+        BuildStockTab();
 
-        tabMain.TabPages.AddRange(new[] { tabShipment, tabPopular, tabProduct });
+        tabMain.TabPages.AddRange(new[] { tabShipment, tabPopular, tabProduct, tabStock });
 
         // ═══ 로그 ═══
         var logPanel = new Panel { Dock = DockStyle.Bottom, Height = 140 };
@@ -301,6 +313,106 @@ public class MainForm : Form
         tabShipment.Controls.Add(leftPanel);
     }
 
+
+    private void BuildStockTab()
+    {
+        var top = new Panel { Dock = DockStyle.Top, Height = 42 };
+        var lbl = new Label { Text = "재고 시트:", Location = new Point(8, 12), AutoSize = true };
+        cboStockSheet = new ComboBox
+        {
+            Location = new Point(70, 8),
+            Width = 360,
+            DropDownStyle = ComboBoxStyle.DropDownList
+        };
+        btnStockLoad = new Button { Text = "📥 불러오기", Location = new Point(440, 6), Width = 100, Height = 30 };
+        var lblInfo = new Label
+        {
+            Text = "기본 연결: 1HWR8zdvx0DYbl4ac9hmGuaaIA47nMO0v1CtO99PyC6w",
+            Location = new Point(560, 12),
+            AutoSize = true,
+            ForeColor = Color.DimGray
+        };
+        top.Controls.AddRange(new Control[] { lbl, cboStockSheet, btnStockLoad, lblInfo });
+
+        dgvStock = CreateGridView();
+        dgvStock.ReadOnly = true;
+
+        tabStock.Controls.Add(dgvStock);
+        tabStock.Controls.Add(top);
+    }
+
+    private async Task InitStockTabAsync()
+    {
+        if (_sheetsReader == null || cboStockSheet == null) return;
+
+        try
+        {
+            var sheets = await Task.Run(() => _sheetsReader.GetSheetList(StockSpreadsheetId));
+            cboStockSheet.Items.Clear();
+
+            foreach (var (title, sheetId) in sheets)
+                cboStockSheet.Items.Add(new StockSheetItem(title, sheetId));
+
+            var defaultIdx = sheets.FindIndex(s => s.sheetId == StockDefaultSheetGid);
+            cboStockSheet.SelectedIndex = defaultIdx >= 0 ? defaultIdx : (cboStockSheet.Items.Count > 0 ? 0 : -1);
+
+            if (cboStockSheet.SelectedIndex >= 0)
+                await LoadStockSheetPreviewAsync();
+        }
+        catch (Exception ex)
+        {
+            _log.Error("재고 시트 초기화 실패", ex);
+        }
+    }
+
+    private async Task LoadStockSheetPreviewAsync()
+    {
+        if (_sheetsReader == null) return;
+        if (cboStockSheet.SelectedItem is not StockSheetItem item) return;
+
+        try
+        {
+            btnStockLoad.Enabled = false;
+            btnStockLoad.Text = "로딩 중...";
+
+            var raw = await Task.Run(() => _sheetsReader.ReadRawSheet(StockSpreadsheetId, item.Title, 500));
+
+            dgvStock.Columns.Clear();
+            dgvStock.Rows.Clear();
+
+            for (int i = 0; i < raw.Headers.Count; i++)
+                dgvStock.Columns.Add($"C{i}", raw.Headers[i]);
+
+            foreach (var row in raw.Rows)
+                dgvStock.Rows.Add(row.Cast<object>().ToArray());
+
+            _log.Info($"재고관리 시트 '{item.Title}' 프리뷰 완료: {raw.Rows.Count}행");
+        }
+        catch (Exception ex)
+        {
+            _log.Error("재고 시트 로드 실패", ex);
+            MessageBox.Show($"재고 시트 로드 오류:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            btnStockLoad.Enabled = true;
+            btnStockLoad.Text = "📥 불러오기";
+        }
+    }
+
+    private sealed class StockSheetItem
+    {
+        public string Title { get; }
+        public int SheetId { get; }
+
+        public StockSheetItem(string title, int sheetId)
+        {
+            Title = title;
+            SheetId = sheetId;
+        }
+
+        public override string ToString() => $"{Title} (gid:{SheetId})";
+    }
     private void BuildPlaceholderTab(TabPage tab, string message)
     {
         var lbl = new Label
@@ -336,6 +448,7 @@ public class MainForm : Form
         btnMatch.Click += async (_, _) => await ExecuteMatchingAsync();
         btnPush.Click += async (_, _) => await ExecutePushAsync();
         btnExportFailed.Click += (_, _) => ExportFailed();
+        if (btnStockLoad != null) btnStockLoad.Click += async (_, _) => await LoadStockSheetPreviewAsync();
     }
 
     // ═══════════════════════════════════════
@@ -454,7 +567,7 @@ public class MainForm : Form
             // ③ 스프레드시트 로드 (발주사 선택 시 필터 적용)
             var selectedVendors = new HashSet<string>();
             foreach (var item in clbVendors.CheckedItems)
-                selectedVendors.Add(item.ToString()!);
+                selectedVendors.Add(NormalizeVendorLabel(item.ToString() ?? ""));
 
             _excelResult = await Task.Run(() =>
                 selectedVendors.Count > 0
@@ -691,3 +804,11 @@ public class ColumnSelectDialog : Form
         AcceptButton = btnOk;
     }
 }
+
+
+
+
+
+
+
+

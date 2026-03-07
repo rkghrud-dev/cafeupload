@@ -272,9 +272,7 @@ public class Cafe24ApiClient
             }
         }
         return null;
-    }
-
-    /// <summary>
+    }    /// <summary>
     /// Refresh Token으로 Access Token 자동 갱신 + appsettings.json 저장
     /// </summary>
     private async Task<bool> RefreshAccessTokenAsync()
@@ -293,16 +291,37 @@ public class Cafe24ApiClient
             var authHeader = Convert.ToBase64String(authBytes);
 
             using var tokenHttp = new HttpClient();
-            var request = new HttpRequestMessage(HttpMethod.Post, tokenUrl);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Basic", authHeader);
-            request.Content = new FormUrlEncodedContent(new Dictionary<string, string>
+            var request = new HttpRequestMessage(HttpMethod.Post, tokenUrl)
             {
-                { "grant_type", "refresh_token" },
-                { "refresh_token", _config.RefreshToken }
-            });
+                Headers = { Authorization = new AuthenticationHeaderValue("Basic", authHeader) },
+                Content = new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    { "grant_type", "refresh_token" },
+                    { "refresh_token", _config.RefreshToken }
+                })
+            };
 
             var resp = await tokenHttp.SendAsync(request);
             var body = await resp.Content.ReadAsStringAsync();
+
+            // 일부 환경에서는 Basic 대신 body(client_id/client_secret) 방식만 허용될 수 있음
+            if (!resp.IsSuccessStatusCode && body.Contains("Invalid client_secret", StringComparison.OrdinalIgnoreCase))
+            {
+                _log.Warn("토큰 갱신 재시도: client_id/client_secret 본문 전송 방식");
+                var retryRequest = new HttpRequestMessage(HttpMethod.Post, tokenUrl)
+                {
+                    Content = new FormUrlEncodedContent(new Dictionary<string, string>
+                    {
+                        { "grant_type", "refresh_token" },
+                        { "refresh_token", _config.RefreshToken },
+                        { "client_id", _config.ClientId },
+                        { "client_secret", _config.ClientSecret }
+                    })
+                };
+
+                resp = await tokenHttp.SendAsync(retryRequest);
+                body = await resp.Content.ReadAsStringAsync();
+            }
 
             if (!resp.IsSuccessStatusCode)
             {
@@ -341,7 +360,6 @@ public class Cafe24ApiClient
             return false;
         }
     }
-
     private void SaveTokensToConfig()
     {
         try
@@ -366,3 +384,4 @@ public class Cafe24ApiClient
         }
     }
 }
+

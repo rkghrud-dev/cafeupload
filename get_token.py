@@ -10,13 +10,13 @@ import base64
 import json
 import urllib.parse
 import threading
+import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # 설정
 MALL_ID = "rkghrud1"
 CLIENT_ID = "CfoSdFlVT6oDL1VUWN9jwB"
-CLIENT_SECRET = "GNXM72AhBReZjZ3GIMEyfO"
-REDIRECT_URI = "https://3a6a-14-6-135-151.ngrok-free.app/oauth/callback"
+CLIENT_SECRET = "xqpSFOC2ENgmKV4IYT5AYC"
 
 SCOPES = ",".join([
     "mall.read_order",
@@ -28,6 +28,18 @@ SCOPES = ",".join([
 
 callback_event = threading.Event()
 callback_data = {"code": None, "error": None}
+
+
+def resolve_redirect_uri():
+    env_redirect = os.getenv("CAFE24_REDIRECT_URI", "").strip()
+    if env_redirect:
+        return env_redirect
+
+    # ngrok 없이 localhost 콜백 고정 사용
+    return "http://localhost:8080/oauth/callback"
+
+
+REDIRECT_URI = resolve_redirect_uri()
 
 
 class CallbackHandler(BaseHTTPRequestHandler):
@@ -138,6 +150,7 @@ def main():
     print("브라우저에서 Cafe24 인증 페이지가 열립니다.")
     print("인증 후 코드를 자동 수신합니다. 실패 시 수동 입력으로 진행합니다.")
     print("=" * 60)
+    print(f"사용 Redirect URI: {REDIRECT_URI}")
     print(f"\n인증 URL:\n{auth_url}\n")
 
     webbrowser.open(auth_url)
@@ -200,3 +213,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
