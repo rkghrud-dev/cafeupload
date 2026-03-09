@@ -416,7 +416,7 @@ public partial class MainForm
         var baseRow = candidates.FirstOrDefault(r => string.Equals(r.ProductCode, baseCode, StringComparison.OrdinalIgnoreCase))
             ?? candidates.First();
 
-        var defaultUnitYuan = ParseDefaultUnitYuan(baseRow.ImportCostRaw, ParseRateEx(_txtStockYuanRate?.Text));
+        var yuanRate = ParseRateEx(_txtStockYuanRate?.Text);
 
         var lines = candidates.Select(r => new StockOrderLineEx
         {
@@ -425,7 +425,7 @@ public partial class MainForm
             OptionText = r.OptionName,
             CurrentStock = r.StockRaw,
             OrderQty = 0,
-            UnitYuan = defaultUnitYuan
+            UnitYuan = ParseDefaultUnitYuan(r.ImportCostRaw, yuanRate)
         }).ToList();
 
         using var dlg = new StockOrderDialogEx(baseCode, baseRow.BuyLink, lines, _db);
