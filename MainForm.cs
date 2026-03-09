@@ -571,27 +571,21 @@ public partial class MainForm : Form
             foreach (var item in clbVendors.CheckedItems)
                 selectedVendors.Add(NormalizeVendorLabel(item.ToString() ?? ""));
 
+            // UI 컨트롤 값을 미리 캡처 (크로스스레드 방지)
+            var startDate = dtpStart.Value;
+            var endDate = dtpEnd.Value;
+
             _excelResult = await Task.Run(() =>
                 selectedVendors.Count > 0
-                    ? _sheetsReader.ReadSheetFiltered(_spreadsheetId, sheetName, selectedVendors, dtpStart.Value, dtpEnd.Value)
+                    ? _sheetsReader.ReadSheetFiltered(_spreadsheetId, sheetName, selectedVendors, startDate, endDate)
                     : _sheetsReader.ReadSheet(_spreadsheetId, sheetName));
-
-            // DB 저장
-            foreach (var row in _excelResult.Rows)
-            {
-                var id = _db.InsertSourceRow(row);
-                if (id > 0) { row.Id = id; }
-                else
-                {
-                    var existing = _db.GetSourceRowsByVendor(row.VendorName)
-                        .FirstOrDefault(r => r.SourceRowKey == row.SourceRowKey);
-                    if (existing != null) row.Id = existing.Id;
-                }
-            }
 
             _filteredRows = _excelResult.Rows;
             _log.Info($"스프레드시트 '{sheetName}' 로드: {_filteredRows.Count}행" +
                 (selectedVendors.Count > 0 ? $" (발주사 {selectedVendors.Count}개 필터)" : " (전체)"));
+
+            // DB 저장: 필터된 행만 단일 트랜잭션으로 처리
+            await Task.Run(() => _db.BulkInsertSourceRows(_filteredRows));
 
             btnMatch.Text = "매칭 중...";
 
@@ -600,7 +594,10 @@ public partial class MainForm : Form
             foreach (var mr in _matchResults)
             {
                 if (mr.SourceRowId > 0)
-                    mr.Id = _db.InsertMatchResult(mr);
+                {
+                    try { mr.Id = _db.InsertMatchResult(mr); }
+                    catch { /* FK 무시 - 메모리 결과로 진행 */ }
+                }
             }
 
             ShowMatchResults();
@@ -639,10 +636,11 @@ public partial class MainForm : Form
         dgvMatch.Columns["Confidence"]!.Width = 70;
         dgvMatch.Columns["MStatus"]!.Width = 80;
 
-        foreach (var mr in _matchResults)
+        for (int i = 0; i < _matchResults.Count; i++)
         {
+            var mr = _matchResults[i];
             bool auto = mr.MatchStatus == "auto_confirmed";
-            var idx = dgvMatch.Rows.Add(auto, mr.Id, mr.SourcePhone, mr.SourceName,
+            var idx = dgvMatch.Rows.Add(auto, i, mr.SourcePhone, mr.SourceName,
                 mr.SourceTracking, mr.Cafe24OrderId, mr.OrderPhone, mr.OrderName,
                 mr.OrderProduct, ConfLabel(mr.Confidence), StatLabel(mr.MatchStatus));
 
@@ -688,10 +686,13 @@ public partial class MainForm : Form
         {
             if (dgvMatch.Rows[i].Cells["Confirm"]?.Value is true)
             {
-                var mrId = Convert.ToInt64(dgvMatch.Rows[i].Cells["MrId"]?.Value);
-                var mr = _matchResults.FirstOrDefault(m => m.Id == mrId);
-                if (mr != null && !string.IsNullOrEmpty(mr.Cafe24OrderId))
-                    confirmed.Add(mr);
+                var mrIdx = Convert.ToInt32(dgvMatch.Rows[i].Cells["MrId"]?.Value);
+                if (mrIdx >= 0 && mrIdx < _matchResults.Count)
+                {
+                    var mr = _matchResults[mrIdx];
+                    if (!string.IsNullOrEmpty(mr.Cafe24OrderId))
+                        confirmed.Add(mr);
+                }
             }
         }
 

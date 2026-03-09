@@ -122,6 +122,12 @@ public class GoogleSheetsReader
         return full;
     }
 
+    // 실제 헤더 행을 찾기 위한 키워드 (이 중 2개 이상 포함되면 헤더 행으로 판단)
+    private static readonly string[] HeaderKeywords = {
+        "발주사", "상품코드", "수령인", "송장", "택배", "주문", "발주일",
+        "수취인", "상품명", "연락처", "휴대폰", "배송", "운송장"
+    };
+
     public ExcelReadResult ReadSheet(string spreadsheetId, string sheetName, int? phoneColumnOverride = null)
     {
         var result = new ExcelReadResult();
@@ -139,8 +145,25 @@ public class GoogleSheetsReader
             return result;
         }
 
-        // 헤더 (1행)
-        var headerRow = values[0];
+        // 헤더 행 자동 탐지: 처음 10행 중 HeaderKeywords 2개 이상 포함된 행을 헤더로 사용
+        int headerRowIndex = 0;
+        int maxKeywordHits = 0;
+        for (int r = 0; r < Math.Min(values.Count, 10); r++)
+        {
+            var rowText = string.Join(" ", values[r].Select(c => c?.ToString() ?? ""));
+            int hits = HeaderKeywords.Count(k => rowText.Contains(k, StringComparison.OrdinalIgnoreCase));
+            if (hits > maxKeywordHits)
+            {
+                maxKeywordHits = hits;
+                headerRowIndex = r;
+            }
+        }
+
+        if (headerRowIndex > 0)
+            _log.Info($"헤더 행 자동탐지: {headerRowIndex + 1}행 (키워드 {maxKeywordHits}개 매칭, 0~{headerRowIndex - 1}행 스킵)");
+
+        // 헤더
+        var headerRow = values[headerRowIndex];
         for (int i = 0; i < headerRow.Count; i++)
             result.Headers.Add(headerRow[i]?.ToString()?.Trim() ?? "");
 
@@ -164,12 +187,35 @@ public class GoogleSheetsReader
                 }
             }
 
-            // 자동 탐색 실패 시 G열(index 6) 폴백
-            if (result.PhoneColumnIndex < 0 && result.Headers.Count > 6)
+            // 자동 탐색 실패 시 로그 + 폴백
+            if (result.PhoneColumnIndex < 0)
             {
-                result.PhoneColumnIndex = 6;
-                result.PhoneColumnName = result.Headers[6] + " (G열 기본값)";
-                _log.Info($"휴대폰 컬럼 자동탐색 실패 → G열 사용: {result.Headers[6]}");
+                // 디버깅: 모든 헤더 출력
+                _log.Warn($"휴대폰 컬럼 자동탐색 실패! 헤더 목록:");
+                for (int i = 0; i < result.Headers.Count; i++)
+                    _log.Info($"  [{(char)('A' + (i < 26 ? i : 0))}열/{i}] \"{result.Headers[i]}\"");
+
+                // 부분 매칭으로 재탐색 (전화, 폰, 휴대, HP, phone, cell 등)
+                var fallbackKeywords = new[] { "전화", "폰", "휴대", "HP", "Phone", "Cell", "연락" };
+                for (int i = 0; i < result.Headers.Count; i++)
+                {
+                    var h = result.Headers[i].Replace(" ", "");
+                    if (fallbackKeywords.Any(k => h.Contains(k, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        result.PhoneColumnIndex = i;
+                        result.PhoneColumnName = result.Headers[i] + " (부분매칭)";
+                        _log.Info($"휴대폰 컬럼 부분매칭 성공 → {i}열: {result.Headers[i]}");
+                        break;
+                    }
+                }
+
+                // 그래도 실패 시 G열 폴백
+                if (result.PhoneColumnIndex < 0 && result.Headers.Count > 6)
+                {
+                    result.PhoneColumnIndex = 6;
+                    result.PhoneColumnName = result.Headers[6] + " (G열 기본값)";
+                    _log.Warn($"최종 폴백 → G열 사용: \"{result.Headers[6]}\"");
+                }
             }
         }
 
@@ -186,7 +232,7 @@ public class GoogleSheetsReader
 
         var vendorSet = new HashSet<string>();
 
-        for (int row = 1; row < values.Count; row++)
+        for (int row = headerRowIndex + 1; row < values.Count; row++)
         {
             var cells = values[row];
             string GetCell(int col) => col < cells.Count ? cells[col]?.ToString()?.Trim() ?? "" : "";

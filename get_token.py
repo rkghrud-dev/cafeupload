@@ -20,6 +20,7 @@ CLIENT_SECRET = "xqpSFOC2ENgmKV4IYT5AYC"
 
 SCOPES = ",".join([
     "mall.read_order",
+    "mall.write_order",
     "mall.read_shipping",
     "mall.write_shipping",
     "mall.read_product",
@@ -35,8 +36,8 @@ def resolve_redirect_uri():
     if env_redirect:
         return env_redirect
 
-    # ngrok 없이 localhost 콜백 고정 사용
-    return "http://localhost:8080/oauth/callback"
+    # Cafe24 개발자센터에 등록된 Redirect URI 사용
+    return "https://e28a-14-6-135-151.ngrok-free.app/oauth/callback"
 
 
 REDIRECT_URI = resolve_redirect_uri()

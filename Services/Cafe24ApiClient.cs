@@ -28,25 +28,16 @@ public class Cafe24ApiClient
     private const int MaxRetries = 3;
 
     // 택배사 코드 매핑 (Cafe24 기준)
+    // 이 쇼핑몰에 등록된 택배사 코드 (admin/carriers API 기준)
     public static readonly Dictionary<string, string> ShippingCompanyCodes = new()
     {
-        { "CJ대한통운", "0019" },
-        { "롯데택배", "0016" },
+        { "CJ대한통운", "0006" },
         { "한진택배", "0018" },
-        { "로젠택배", "0020" },
-        { "우체국택배", "0001" },
-        { "경동택배", "0023" },
-        { "대신택배", "0022" },
-        { "일양로지스", "0011" },
-        { "합동택배", "0032" },
-        { "건영택배", "0034" },
-        { "천일택배", "0017" },
-        { "CU편의점택배", "0049" },
-        { "GS편의점택배", "0050" },
-        { "EMS", "0005" },
-        { "DHL", "0004" },
-        { "FedEx", "0012" },
-        { "UPS", "0015" },
+        { "롯데글로벌로지스", "0079" },
+        { "롯데택배", "0079" },
+        { "로젠택배", "0004" },
+        { "우체국택배", "0012" },
+        { "자체배송", "0001" },
     };
 
     public Cafe24ApiClient(Cafe24Config config, AppLogger logger)
@@ -85,7 +76,7 @@ public class Cafe24ApiClient
             var statusLabel = orderStatus != null ? $", 상태={orderStatus}" : "";
             progress?.Report($"Cafe24 주문 조회 중... (페이지 {page}{statusLabel})");
 
-            var url = $"admin/orders?start_date={startDate}&end_date={endDate}&limit={limit}&offset={offset}";
+            var url = $"admin/orders?start_date={startDate}&end_date={endDate}&limit={limit}&offset={offset}&embed=receivers,items";
             if (!string.IsNullOrEmpty(orderStatus))
                 url += $"&order_status={orderStatus}";
             var response = await ExecuteWithRetry(() => _http.GetAsync(url));
@@ -135,12 +126,25 @@ public class Cafe24ApiClient
 
     private Cafe24Order ParseOrder(JToken order, JToken? item, string orderId)
     {
-        // 수령인 정보는 receiver 필드에 있을 수 있음
-        var receiverName = order["receiver_name"]?.ToString()
-                          ?? order["buyer_name"]?.ToString() ?? "";
-        var receiverPhone = order["receiver_cellphone"]?.ToString()
-                           ?? order["receiver_phone"]?.ToString() ?? "";
-        var receiverPhone2 = order["receiver_phone"]?.ToString() ?? "";
+        // 수령인 정보: receivers 배열(embed) → 최상위 필드 → billing_name 순서로 탐색
+        var receivers = order["receivers"] as JArray;
+        var receiver = receivers?.FirstOrDefault();
+
+        var receiverName = receiver?["name"]?.ToString()
+                          ?? receiver?["receiver_name"]?.ToString()
+                          ?? order["receiver_name"]?.ToString()
+                          ?? order["buyer_name"]?.ToString()
+                          ?? order["billing_name"]?.ToString() ?? "";
+
+        var receiverPhone = receiver?["cellphone"]?.ToString()
+                           ?? receiver?["receiver_cellphone"]?.ToString()
+                           ?? order["receiver_cellphone"]?.ToString()
+                           ?? order["buyer_cellphone"]?.ToString() ?? "";
+
+        var receiverPhone2 = receiver?["phone"]?.ToString()
+                            ?? receiver?["receiver_phone"]?.ToString()
+                            ?? order["receiver_phone"]?.ToString()
+                            ?? order["buyer_phone"]?.ToString() ?? "";
 
         return new Cafe24Order
         {
@@ -172,19 +176,15 @@ public class Cafe24ApiClient
 
         try
         {
-            // 1) 기존 shipment 조회
+            // Cafe24 배송 정보 등록 API: POST /admin/orders/{order_id}/shipments
             var shipmentsUrl = $"admin/orders/{orderId}/shipments";
-            var getResp = await ExecuteWithRetry(() => _http.GetAsync(shipmentsUrl));
-            var getBody = getResp != null ? await getResp.Content.ReadAsStringAsync() : "";
 
-            _log.Info($"Shipment 조회: {orderId} → {getResp?.StatusCode}");
-
-            // 2) 송장 정보 업데이트 (POST로 생성 또는 PUT으로 업데이트)
             var payload = new
             {
                 shop_no = 1,
                 request = new
                 {
+                    order_item_code = new[] { orderItemCode },
                     tracking_no = trackingNumber,
                     shipping_company_code = shippingCompanyCode,
                     status = "shipping"
@@ -192,28 +192,16 @@ public class Cafe24ApiClient
             };
 
             var jsonPayload = JsonConvert.SerializeObject(payload);
-            var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
+            _log.Info($"송장 반영 요청: {orderId} → {shipmentsUrl}, body={jsonPayload}");
 
-            // shipping_code가 있으면 PUT, 없으면 POST
-            HttpResponseMessage? resp;
-            if (!string.IsNullOrEmpty(orderItemCode))
+            var resp = await ExecuteWithRetry(() =>
             {
-                // Cafe24 fulfillments API
-                var fulfillUrl = $"admin/orders/{orderId}/items/{orderItemCode}/shipments";
-                resp = await ExecuteWithRetry(() =>
+                var req = new HttpRequestMessage(HttpMethod.Post, shipmentsUrl)
                 {
-                    var req = new HttpRequestMessage(HttpMethod.Post, fulfillUrl)
-                    {
-                        Content = new StringContent(jsonPayload, Encoding.UTF8, "application/json")
-                    };
-                    return _http.SendAsync(req);
-                });
-            }
-            else
-            {
-                resp = await ExecuteWithRetry(() =>
-                    _http.PostAsync(shipmentsUrl, new StringContent(jsonPayload, Encoding.UTF8, "application/json")));
-            }
+                    Content = new StringContent(jsonPayload, Encoding.UTF8, "application/json")
+                };
+                return _http.SendAsync(req);
+            });
 
             var respBody = resp != null ? await resp.Content.ReadAsStringAsync() : "no response";
             var statusCode = (int)(resp?.StatusCode ?? 0);

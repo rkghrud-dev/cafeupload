@@ -151,6 +151,37 @@ public class DatabaseManager
             SELECT last_insert_rowid();", row);
     }
 
+    /// <summary>
+    /// 필터된 행만 단일 트랜잭션으로 DB 저장 (INSERT OR IGNORE + ID 할당)
+    /// </summary>
+    public void BulkInsertSourceRows(List<ShipmentSourceRow> rows)
+    {
+        using var conn = GetConnection();
+        using var tx = conn.BeginTransaction();
+
+        foreach (var row in rows)
+        {
+            var id = conn.ExecuteScalar<long>(@"
+                INSERT OR IGNORE INTO shipment_source_rows
+                    (SourceRowKey, VendorName, TrackingNumber, RecipientPhone, RecipientName, ProductCode, OrderDate, ShippingCompany, RawData, ProcessStatus, ImportedAt)
+                VALUES
+                    (@SourceRowKey, @VendorName, @TrackingNumber, @RecipientPhone, @RecipientName, @ProductCode, @OrderDate, @ShippingCompany, @RawData, @ProcessStatus, @ImportedAt);
+                SELECT last_insert_rowid();", row, transaction: tx);
+
+            if (id > 0)
+                row.Id = id;
+            else
+            {
+                var existingId = conn.ExecuteScalar<long?>(
+                    "SELECT Id FROM shipment_source_rows WHERE SourceRowKey = @SourceRowKey",
+                    new { row.SourceRowKey }, transaction: tx);
+                if (existingId.HasValue) row.Id = existingId.Value;
+            }
+        }
+
+        tx.Commit();
+    }
+
     public List<ShipmentSourceRow> GetSourceRowsByVendor(string vendor)
     {
         using var conn = GetConnection();

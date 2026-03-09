@@ -167,6 +167,7 @@ public class MatchingEngine
 
     /// <summary>
     /// 역방향 매칭: Cafe24 주문 기준으로 스프레드시트에서 송장 검색
+    /// (전화번호 우선, 실패 시 수령인명으로 폴백)
     /// </summary>
     public List<MatchResult> ExecuteReverseMatching(List<Cafe24Order> orders, List<ShipmentSourceRow> sheetRows)
     {
@@ -184,6 +185,29 @@ public class MatchingEngine
             phoneIndex[phone].Add(row);
         }
 
+        // 스프레드시트 수령인명 → 행 인덱스 (폴백용)
+        var nameIndex = new Dictionary<string, List<ShipmentSourceRow>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in sheetRows)
+        {
+            var name = row.RecipientName?.Trim();
+            if (string.IsNullOrEmpty(name)) continue;
+            if (!nameIndex.ContainsKey(name))
+                nameIndex[name] = new();
+            nameIndex[name].Add(row);
+        }
+
+        int phoneIndexCount = phoneIndex.Values.Sum(v => v.Count);
+        int nameIndexCount = nameIndex.Values.Sum(v => v.Count);
+        _log.Info($"매칭 인덱스: 전화번호 {phoneIndex.Count}개 키({phoneIndexCount}행), 수령인명 {nameIndex.Count}개 키({nameIndexCount}행)");
+
+        // 디버깅: 샘플 데이터 출력
+        var sampleSheetPhones = phoneIndex.Keys.Take(3).ToList();
+        var sampleSheetNames = nameIndex.Keys.Take(3).ToList();
+        var sampleOrderPhones = orders.Take(3).Select(o => $"'{o.RecipientName}'/{o.RecipientCellPhone}").ToList();
+        _log.Info($"[샘플] 시트 전화번호: {string.Join(", ", sampleSheetPhones)}");
+        _log.Info($"[샘플] 시트 수령인명: {string.Join(", ", sampleSheetNames)}");
+        _log.Info($"[샘플] Cafe24 주문: {string.Join(", ", sampleOrderPhones)}");
+
         int exactCount = 0, noTrackingCount = 0, candidateCount = 0, noMatchCount = 0;
 
         foreach (var order in orders)
@@ -191,12 +215,25 @@ public class MatchingEngine
             var phone = order.RecipientCellPhone;
             var phone2 = order.RecipientPhone;
 
-            // 전화번호로 스프레드시트 행 검색
+            // 1차: 전화번호로 스프레드시트 행 검색
             var candidates = new List<ShipmentSourceRow>();
             if (!string.IsNullOrEmpty(phone) && phoneIndex.TryGetValue(phone, out var list1))
                 candidates.AddRange(list1);
             if (!string.IsNullOrEmpty(phone2) && phone2 != phone && phoneIndex.TryGetValue(phone2, out var list2))
                 candidates.AddRange(list2);
+
+            // 2차: 전화번호 매칭 실패 시 수령인명으로 폴백
+            bool usedNameFallback = false;
+            if (candidates.Count == 0 && !string.IsNullOrEmpty(order.RecipientName))
+            {
+                var orderName = order.RecipientName.Trim();
+                if (nameIndex.TryGetValue(orderName, out var nameList))
+                {
+                    candidates.AddRange(nameList);
+                    usedNameFallback = true;
+                    _log.Info($"전화번호 매칭 실패 → 수령인명 폴백: '{orderName}' → {nameList.Count}건 후보");
+                }
+            }
 
             // 중복 제거
             candidates = candidates.DistinctBy(r => r.Id > 0 ? (object)r.Id : r.SourceRowKey).ToList();
@@ -255,7 +292,7 @@ public class MatchingEngine
             if (withTracking.Count == 1)
             {
                 var src = withTracking[0];
-                var confidence = DetermineReverseConfidence(order, src);
+                var confidence = DetermineReverseConfidence(order, src, usedNameFallback);
                 results.Add(new MatchResult
                 {
                     SourceRowId = src.Id,
@@ -277,11 +314,12 @@ public class MatchingEngine
             }
             else
             {
-                // 다중 후보: 이름 매칭 시도
+                // 다중 후보: 이름 매칭 시도 (양방향)
                 var nameMatches = withTracking
                     .Where(r => !string.IsNullOrEmpty(order.RecipientName) &&
                                 !string.IsNullOrEmpty(r.RecipientName) &&
-                                order.RecipientName.Contains(r.RecipientName))
+                                (order.RecipientName.Contains(r.RecipientName) ||
+                                 r.RecipientName.Contains(order.RecipientName)))
                     .ToList();
 
                 if (nameMatches.Count == 1)
@@ -338,20 +376,30 @@ public class MatchingEngine
         return results;
     }
 
-    private string DetermineReverseConfidence(Cafe24Order order, ShipmentSourceRow src)
+    private string DetermineReverseConfidence(Cafe24Order order, ShipmentSourceRow src, bool usedNameFallback = false)
     {
-        // 전화번호 일치(기본)
-        bool phoneMatch = src.RecipientPhone == order.RecipientCellPhone ||
-                          src.RecipientPhone == order.RecipientPhone;
-        if (!phoneMatch) return "none";
+        bool phoneMatch = !string.IsNullOrEmpty(src.RecipientPhone) &&
+                          (src.RecipientPhone == order.RecipientCellPhone ||
+                           src.RecipientPhone == order.RecipientPhone);
 
-        // 이름도 일치하면 exact
-        if (!string.IsNullOrEmpty(src.RecipientName) &&
-            !string.IsNullOrEmpty(order.RecipientName) &&
-            order.RecipientName.Contains(src.RecipientName))
-            return "exact";
+        bool nameMatch = !string.IsNullOrEmpty(src.RecipientName) &&
+                         !string.IsNullOrEmpty(order.RecipientName) &&
+                         (order.RecipientName.Contains(src.RecipientName) ||
+                          src.RecipientName.Contains(order.RecipientName));
 
-        return "probable";
+        // 전화번호 + 이름 모두 일치 → exact
+        if (phoneMatch && nameMatch) return "exact";
+
+        // 전화번호만 일치 → probable
+        if (phoneMatch) return "probable";
+
+        // 이름만 일치 (전화번호 매칭 실패 폴백) → probable
+        if (usedNameFallback && nameMatch) return "probable";
+
+        // 이름만 일치 (일반) → candidate
+        if (nameMatch) return "candidate";
+
+        return "none";
     }
 
     private string DetermineConfidence(ShipmentSourceRow src, Cafe24Order order)
