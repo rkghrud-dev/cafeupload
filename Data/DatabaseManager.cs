@@ -67,21 +67,19 @@ public class DatabaseManager
                 Confidence TEXT DEFAULT 'none',
                 MatchStatus TEXT DEFAULT 'pending',
                 ChosenByUser INTEGER DEFAULT 0,
-                CreatedAt TEXT NOT NULL,
-                FOREIGN KEY (SourceRowId) REFERENCES shipment_source_rows(Id)
+                CreatedAt TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS push_log (
                 Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                MatchResultId INTEGER NOT NULL,
+                MatchResultId INTEGER NOT NULL DEFAULT 0,
                 Cafe24OrderId TEXT DEFAULT '',
                 RequestBody TEXT DEFAULT '',
                 ResponseBody TEXT DEFAULT '',
                 HttpStatusCode INTEGER DEFAULT 0,
                 Result TEXT DEFAULT '',
                 ErrorMessage TEXT DEFAULT '',
-                PushedAt TEXT NOT NULL,
-                FOREIGN KEY (MatchResultId) REFERENCES match_results(Id)
+                PushedAt TEXT NOT NULL
             );
 
             CREATE INDEX IF NOT EXISTS idx_source_vendor ON shipment_source_rows(VendorName);
