@@ -134,6 +134,11 @@ public class DatabaseManager
             CREATE INDEX IF NOT EXISTS idx_soh_ordered ON stock_order_headers(OrderedAt);
             CREATE INDEX IF NOT EXISTS idx_sol_header ON stock_order_lines(HeaderId);
             CREATE INDEX IF NOT EXISTS idx_sol_product ON stock_order_lines(ProductCode);
+
+            CREATE TABLE IF NOT EXISTS discontinued_products (
+                ProductCode TEXT PRIMARY KEY,
+                MarkedAt TEXT NOT NULL
+            );
         ");
     }
 
@@ -444,6 +449,37 @@ public class DatabaseManager
             {whereClause}
             GROUP BY SUBSTR(h.OrderedAt, 1, 7)
             ORDER BY Month", param).ToList();
+    }
+
+    // ── Discontinued Products ──
+    public void AddDiscontinued(List<string> codes)
+    {
+        if (codes.Count == 0) return;
+        using var conn = GetConnection();
+        using var tx = conn.BeginTransaction();
+        var now = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+        foreach (var code in codes)
+            conn.Execute("INSERT OR IGNORE INTO discontinued_products (ProductCode, MarkedAt) VALUES (@code, @now)",
+                new { code, now }, transaction: tx);
+        tx.Commit();
+    }
+
+    public void RemoveDiscontinued(List<string> codes)
+    {
+        if (codes.Count == 0) return;
+        using var conn = GetConnection();
+        using var tx = conn.BeginTransaction();
+        foreach (var code in codes)
+            conn.Execute("DELETE FROM discontinued_products WHERE ProductCode = @code",
+                new { code }, transaction: tx);
+        tx.Commit();
+    }
+
+    public HashSet<string> GetAllDiscontinued()
+    {
+        using var conn = GetConnection();
+        return conn.Query<string>("SELECT ProductCode FROM discontinued_products")
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 }
 

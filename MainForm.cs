@@ -513,16 +513,19 @@ public partial class MainForm : Form
         dgvMatch.Columns.Clear(); dgvMatch.Rows.Clear();
         dgvResult.Columns.Clear(); dgvResult.Rows.Clear();
 
+        UpdateOrderSelectionSummaryEx();
+
         tabShipSub.SelectedIndex = 0;
         lblStatus.Text = "🔄 초기화 완료";
         lblStatus.ForeColor = Color.Gray;
         _log.Info("초기화 완료");
     }
-
     private void ShowDataPreview()
     {
         dgvData.Columns.Clear();
         dgvData.Rows.Clear();
+
+        EnsureOrderSelectionColumnEx();
 
         dgvData.Columns.Add("No", "#");
         dgvData.Columns.Add("OrderId", "주문번호");
@@ -533,6 +536,7 @@ public partial class MainForm : Form
         dgvData.Columns.Add("Phone", "전화번호");
         dgvData.Columns.Add("OrderStatus", "주문상태");
 
+        dgvData.Columns[OrderSelectColumnNameEx]!.Width = 50;
         dgvData.Columns["No"]!.Width = 40;
         dgvData.Columns["OrderId"]!.Width = 130;
         dgvData.Columns["OrderDate"]!.Width = 90;
@@ -545,11 +549,14 @@ public partial class MainForm : Form
         for (int i = 0; i < _cafe24Orders.Count; i++)
         {
             var o = _cafe24Orders[i];
-            dgvData.Rows.Add(i + 1, o.OrderId, o.OrderDate, o.ProductName,
-                o.Quantity, o.RecipientName, o.RecipientCellPhone, o.OrderStatus);
+            var phone = string.IsNullOrWhiteSpace(o.RecipientCellPhone) ? o.RecipientPhone : o.RecipientCellPhone;
+            var rowIndex = dgvData.Rows.Add(false, i + 1, o.OrderId, o.OrderDate, o.ProductName,
+                o.Quantity, o.RecipientName, phone, o.OrderStatus);
+            dgvData.Rows[rowIndex].Tag = o;
         }
-    }
 
+        UpdateOrderSelectionSummaryEx();
+    }
     // ═══════════════════════════════════════
     // 매칭 실행
     // ═══════════════════════════════════════
@@ -807,4 +814,5 @@ public class ColumnSelectDialog : Form
         AcceptButton = btnOk;
     }
 }
+
 

@@ -28,10 +28,16 @@ public partial class MainForm
     private List<StockRowEx> _stockRowsEx = new();
     private bool _enhancedStockUiBuilt;
 
+    private ComboBox? _cboDiscontinuedFilter;
+    private HashSet<string> _discontinuedCodes = new(StringComparer.OrdinalIgnoreCase);
+    private bool _stockDragSelecting;
+    private int _stockDragStartRow = -1;
+
     private void InitEnhancedState()
     {
         LoadEnhancedState();
         EnsureShipmentFavoriteButton();
+        EnsureOrderExportUi();
     }
 
     private List<string> ApplyShipmentVendorOrder(IEnumerable<string> vendors)
@@ -198,15 +204,59 @@ public partial class MainForm
             dlg.ShowDialog(this);
         };
 
+        var lblDiscon = new Label { Text = "단종:", Location = new Point(996, 12), AutoSize = true };
+        _cboDiscontinuedFilter = new ComboBox
+        {
+            Location = new Point(1034, 8), Width = 100,
+            DropDownStyle = ComboBoxStyle.DropDownList
+        };
+        _cboDiscontinuedFilter.Items.AddRange(new object[] { "단종 숨김", "단종 포함", "단종만 보기" });
+        _cboDiscontinuedFilter.SelectedIndex = 0;
+        _cboDiscontinuedFilter.SelectedIndexChanged += (_, _) => ApplyEnhancedStockFilterAndRender();
+
         top.Controls.AddRange(new Control[]
         {
             lblSheet, cboStockSheet, btnStockLoad, _btnStockApplyFilter,
-            lblRate, _txtStockYuanRate, lblSearch, _txtStockSearch, _btnStockColumns, btnStockHistory
+            lblRate, _txtStockYuanRate, lblSearch, _txtStockSearch, _btnStockColumns, btnStockHistory,
+            lblDiscon, _cboDiscontinuedFilter
         });
 
         dgvStock = CreateGridView();
-        dgvStock.ReadOnly = true;
-        dgvStock.CellDoubleClick += (_, e) => OpenStockOrderDialogFromGrid(e.RowIndex);
+        dgvStock.ReadOnly = false;
+        dgvStock.CellDoubleClick += (_, e) =>
+        {
+            if (e.ColumnIndex >= 0 && dgvStock.Columns[e.ColumnIndex].Name == "Chk") return;
+            OpenStockOrderDialogFromGrid(e.RowIndex);
+        };
+
+        // 단종 상품 로드
+        _discontinuedCodes = _db.GetAllDiscontinued();
+
+        // 컨텍스트 메뉴
+        var ctxStock = new ContextMenuStrip();
+        var miDiscontinue = new ToolStripMenuItem("단종 처리");
+        miDiscontinue.Click += (_, _) => MarkCheckedRowsDiscontinued(true);
+        var miUndiscontinue = new ToolStripMenuItem("단종 해제");
+        miUndiscontinue.Click += (_, _) => MarkCheckedRowsDiscontinued(false);
+        var miOrder = new ToolStripMenuItem("주문 발주");
+        miOrder.Click += (_, _) =>
+        {
+            if (dgvStock.CurrentRow != null) OpenStockOrderDialogFromGrid(dgvStock.CurrentRow.Index);
+        };
+        var miCopy = new ToolStripMenuItem("코드 복사");
+        miCopy.Click += (_, _) => CopyCheckedProductCodes();
+        ctxStock.Items.AddRange(new ToolStripItem[] { miDiscontinue, miUndiscontinue, new ToolStripSeparator(), miOrder, miCopy });
+        dgvStock.ContextMenuStrip = ctxStock;
+
+        // 드래그 선택
+        dgvStock.CellMouseDown += StockGrid_CellMouseDown;
+        dgvStock.CellMouseEnter += StockGrid_CellMouseEnter;
+        dgvStock.CellMouseUp += StockGrid_CellMouseUp;
+        // 체크박스 외 컬럼은 읽기전용 처리
+        dgvStock.CellBeginEdit += (_, e) =>
+        {
+            if (e.ColumnIndex < 0 || dgvStock.Columns[e.ColumnIndex].Name != "Chk") e.Cancel = true;
+        };
 
         var right = new Panel { Dock = DockStyle.Fill };
         right.Controls.Add(dgvStock);
@@ -332,6 +382,13 @@ public partial class MainForm
                                 || r.OrderCode.Contains(keyword, StringComparison.OrdinalIgnoreCase)
                                 || r.OptionName.Contains(keyword, StringComparison.OrdinalIgnoreCase));
 
+        // 단종 필터: 0=숨김, 1=포함, 2=단종만
+        int disconMode = _cboDiscontinuedFilter?.SelectedIndex ?? 0;
+        if (disconMode == 0)
+            rows = rows.Where(r => !_discontinuedCodes.Contains(r.ProductCode));
+        else if (disconMode == 2)
+            rows = rows.Where(r => _discontinuedCodes.Contains(r.ProductCode));
+
         RenderEnhancedStock(rows.ToList());
     }
 
@@ -340,24 +397,38 @@ public partial class MainForm
         dgvStock.Columns.Clear();
         dgvStock.Rows.Clear();
 
+        // 체크박스 컬럼
+        var chkCol = new DataGridViewCheckBoxColumn
+        {
+            Name = "Chk", HeaderText = "선택", Width = 40, FalseValue = false, TrueValue = true
+        };
+        dgvStock.Columns.Add(chkCol);
+
         var columns = new[] { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "M", "N", "O" }
             .Where(c => _visibleStockColumnsEx.Contains(c)).ToList();
         if (columns.Count == 0) columns = new List<string> { "A", "B", "C", "M" };
 
         foreach (var c in columns)
         {
-            dgvStock.Columns.Add(c, c switch
+            var col = new DataGridViewTextBoxColumn
             {
-                "A" => "상품코드", "B" => "주문코드", "C" => "공급사", "D" => "수입가", "E" => "공급가",
-                "F" => "소매가", "G" => "입고", "H" => "판매", "I" => "2달전", "J" => "1달전", "K" => "이달",
-                "M" => "재고", "N" => "구매링크", "O" => "옵션명", _ => c
-            });
+                Name = c,
+                HeaderText = c switch
+                {
+                    "A" => "상품코드", "B" => "주문코드", "C" => "공급사", "D" => "수입가", "E" => "공급가",
+                    "F" => "소매가", "G" => "입고", "H" => "판매", "I" => "2달전", "J" => "1달전", "K" => "이달",
+                    "M" => "재고", "N" => "구매링크", "O" => "옵션명", _ => c
+                },
+                ReadOnly = true
+            };
+            dgvStock.Columns.Add(col);
         }
 
         var rate = ParseRateEx(_txtStockYuanRate?.Text);
+        var strikeFont = new Font(dgvStock.Font, FontStyle.Strikeout);
         foreach (var r in rows)
         {
-            var vals = new List<object>();
+            var vals = new List<object> { false }; // 체크박스 초기값
             foreach (var c in columns)
             {
                 vals.Add(c switch
@@ -382,11 +453,18 @@ public partial class MainForm
             var idx = dgvStock.Rows.Add(vals.ToArray());
             dgvStock.Rows[idx].Tag = r;
 
-            if (columns.Contains("M"))
+            // 단종 상품 스타일
+            if (_discontinuedCodes.Contains(r.ProductCode))
+            {
+                dgvStock.Rows[idx].DefaultCellStyle.BackColor = Color.FromArgb(224, 224, 224);
+                dgvStock.Rows[idx].DefaultCellStyle.ForeColor = Color.Gray;
+                dgvStock.Rows[idx].DefaultCellStyle.Font = strikeFont;
+            }
+            else if (columns.Contains("M"))
             {
                 var cell = dgvStock.Rows[idx].Cells["M"];
                 cell.Style.BackColor = Color.FromArgb(255, 249, 196);
-                if (r.Inbound > 0 && r.Stock >= 0 && r.Stock < r.Inbound * 0.3m)
+                if (r.ThreeMonthSales > 0 && r.Stock >= 0 && r.Stock < r.ThreeMonthSales * 0.3m)
                 {
                     cell.Style.BackColor = Color.FromArgb(255, 205, 210);
                     cell.Style.ForeColor = Color.DarkRed;
@@ -398,6 +476,71 @@ public partial class MainForm
 
         _log.Info($"재고 필터 결과: {rows.Count}행");
     }
+    // ── 드래그 선택 ──
+    private void StockGrid_CellMouseDown(object? sender, DataGridViewCellMouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left || e.RowIndex < 0) return;
+        // Chk 컬럼 직접 클릭은 기본 동작에 맡김
+        if (e.ColumnIndex >= 0 && dgvStock.Columns[e.ColumnIndex].Name == "Chk") return;
+        _stockDragSelecting = true;
+        _stockDragStartRow = e.RowIndex;
+        dgvStock.Rows[e.RowIndex].Cells["Chk"].Value = !(dgvStock.Rows[e.RowIndex].Cells["Chk"].Value is true);
+    }
+
+    private void StockGrid_CellMouseEnter(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (!_stockDragSelecting || e.RowIndex < 0) return;
+        dgvStock.Rows[e.RowIndex].Cells["Chk"].Value = true;
+    }
+
+    private void StockGrid_CellMouseUp(object? sender, DataGridViewCellMouseEventArgs e)
+    {
+        _stockDragSelecting = false;
+        _stockDragStartRow = -1;
+    }
+
+    // ── 단종 처리/해제 ──
+    private void MarkCheckedRowsDiscontinued(bool discontinue)
+    {
+        dgvStock.CommitEdit(DataGridViewDataErrorContexts.Commit);
+        var codes = new List<string>();
+        foreach (DataGridViewRow row in dgvStock.Rows)
+        {
+            if (row.Cells["Chk"].Value is true && row.Tag is StockRowEx sr)
+                codes.Add(sr.ProductCode);
+        }
+        if (codes.Count == 0) { MessageBox.Show("선택된 항목이 없습니다.", "알림"); return; }
+
+        if (discontinue)
+        {
+            _db.AddDiscontinued(codes);
+            foreach (var c in codes) _discontinuedCodes.Add(c);
+        }
+        else
+        {
+            _db.RemoveDiscontinued(codes);
+            foreach (var c in codes) _discontinuedCodes.Remove(c);
+        }
+
+        ApplyEnhancedStockFilterAndRender();
+    }
+
+    // ── 코드 복사 ──
+    private void CopyCheckedProductCodes()
+    {
+        dgvStock.CommitEdit(DataGridViewDataErrorContexts.Commit);
+        var codes = new List<string>();
+        foreach (DataGridViewRow row in dgvStock.Rows)
+        {
+            if (row.Cells["Chk"].Value is true && row.Tag is StockRowEx sr)
+                codes.Add(sr.ProductCode);
+        }
+        if (codes.Count == 0 && dgvStock.CurrentRow?.Tag is StockRowEx cur)
+            codes.Add(cur.ProductCode);
+        if (codes.Count > 0)
+            Clipboard.SetText(string.Join("\n", codes));
+    }
+
     private void OpenStockOrderDialogFromGrid(int rowIndex)
     {
         if (rowIndex < 0 || rowIndex >= dgvStock.Rows.Count) return;
@@ -472,7 +615,8 @@ public partial class MainForm
 
         var lows = _stockRowsEx
             .Where(r => _favoriteStockVendorsEx.Contains(r.Supplier))
-            .Where(r => r.Inbound > 0 && r.Stock >= 0 && r.Stock < r.Inbound * 0.3m)
+            .Where(r => !_discontinuedCodes.Contains(r.ProductCode))
+            .Where(r => r.ThreeMonthSales > 0 && r.Stock >= 0 && r.Stock < r.ThreeMonthSales * 0.3m)
             .Take(200)
             .ToList();
         if (lows.Count == 0) return;
@@ -489,10 +633,10 @@ public partial class MainForm
         };
         grid.Columns.Add("A", "상품코드");
         grid.Columns.Add("C", "공급사");
-        grid.Columns.Add("G", "입고");
+        grid.Columns.Add("S", "3개월판매");
         grid.Columns.Add("M", "재고");
         grid.Columns.Add("O", "옵션명");
-        foreach (var r in lows) grid.Rows.Add(r.ProductCode, r.Supplier, r.InboundRaw, r.StockRaw, r.OptionName);
+        foreach (var r in lows) grid.Rows.Add(r.ProductCode, r.Supplier, r.ThreeMonthSales.ToString("N0"), r.StockRaw, r.OptionName);
 
         var bottom = new Panel { Dock = DockStyle.Bottom, Height = 42 };
         var chkMute = new CheckBox { Text = "오늘은 알람 안 울림", AutoSize = true, Location = new Point(8, 12) };
@@ -622,6 +766,9 @@ public partial class MainForm
             r.SupplyPrice = ParseDecimalEx(r.SupplyPriceRaw);
             r.RetailPrice = ParseDecimalEx(r.RetailPriceRaw);
             r.Inbound = ParseDecimalEx(r.InboundRaw);
+            r.TwoMonth = ParseDecimalEx(r.TwoMonthRaw);
+            r.OneMonth = ParseDecimalEx(r.OneMonthRaw);
+            r.ThisMonth = ParseDecimalEx(r.ThisMonthRaw);
             r.Stock = ParseDecimalEx(r.StockRaw);
 
             if (string.IsNullOrWhiteSpace(r.ProductCode) && string.IsNullOrWhiteSpace(r.OrderCode) && string.IsNullOrWhiteSpace(r.Supplier))
@@ -732,7 +879,11 @@ public partial class MainForm
         public decimal SupplyPrice { get; set; }
         public decimal RetailPrice { get; set; }
         public decimal Inbound { get; set; }
+        public decimal TwoMonth { get; set; }
+        public decimal OneMonth { get; set; }
+        public decimal ThisMonth { get; set; }
         public decimal Stock { get; set; }
+        public decimal ThreeMonthSales => (TwoMonth < 0 ? 0 : TwoMonth) + (OneMonth < 0 ? 0 : OneMonth) + (ThisMonth < 0 ? 0 : ThisMonth);
     }
 
     private sealed class EnhancedUiState
@@ -1598,3 +1749,4 @@ internal class DoubleBufferedPanel : Panel
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
     }
 }
+
