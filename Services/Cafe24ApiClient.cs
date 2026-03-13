@@ -27,6 +27,8 @@ public class Cafe24ApiClient
     private readonly Cafe24Config _config;
     private readonly AppLogger _log;
     private const int MaxRetries = 3;
+    private const string SharedOAuthScope =
+        "mall.read_order,mall.write_order,mall.read_shipping,mall.write_shipping,mall.read_product,mall.write_product";
 
     // 택배사 코드 매핑 (Cafe24 기준)
     // 이 쇼핑몰에 등록된 택배사 코드 (admin/carriers API 기준)
@@ -224,6 +226,8 @@ public class Cafe24ApiClient
 
     private async Task<HttpResponseMessage?> ExecuteWithRetry(Func<Task<HttpResponseMessage>> action)
     {
+        var reauthorizedForScope = false;
+
         for (int i = 0; i < MaxRetries; i++)
         {
             try
@@ -240,6 +244,22 @@ public class Cafe24ApiClient
                         return resp;
                     }
                     return resp;
+                }
+
+                if (resp.StatusCode == HttpStatusCode.Forbidden && !reauthorizedForScope)
+                {
+                    var body = await resp.Content.ReadAsStringAsync();
+                    if (body.Contains("insufficient_scope", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _log.Warn("Access Token scope 부족 감지, OAuth 재인증 시도...");
+                        if (await ReauthorizeViaOAuthAsync())
+                        {
+                            reauthorizedForScope = true;
+                            resp = await action();
+                        }
+
+                        return resp;
+                    }
                 }
 
                 // Rate limit 처리
@@ -361,12 +381,11 @@ public class Cafe24ApiClient
             return false;
         }
 
-        var scope = "mall.read_order,mall.write_order,mall.read_shipping,mall.write_shipping";
         var state = Guid.NewGuid().ToString("N")[..8];
         var authUrl = $"https://{_config.MallId}.cafe24api.com/api/v2/oauth/authorize" +
             $"?response_type=code&client_id={_config.ClientId}" +
             $"&redirect_uri={Uri.EscapeDataString(_config.RedirectUri)}" +
-            $"&scope={scope}&state={state}";
+            $"&scope={SharedOAuthScope}&state={state}";
 
         // 브라우저 열기
         System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(authUrl) { UseShellExecute = true });
